@@ -1,0 +1,19 @@
+.codex
+
+# Local secrets / runtime config
+.env
+.env.local
+.env.token-deployer
+
+# Foundry artifacts
+out/
+cache/
+broadcast/
+
+# Generated local deployer artifacts
+token-deployer.request.json
+token-deployer.normalized.json
+deployments/
+
+# Node runtime artifacts
+node_modules/

@@ -1,0 +1,9 @@
+{
+  "name": "defi-token-deployer",
+  "version": "0.1.0",
+  "description": "CLI and skill for rapidly deploying DeFi-compatible ERC20 and ERC721 tokens.",
+  "type": "module",
+  "bin": {
+    "token-deployer": "./bin/token-deployer"
+  }
+}

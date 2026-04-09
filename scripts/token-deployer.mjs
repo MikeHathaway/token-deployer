@@ -1,0 +1,442 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, "..");
+const NORMALIZER_PATH = path.join(ROOT_DIR, "scripts", "normalize_token_config.py");
+const TEMPLATE_DIR = path.join(ROOT_DIR, "assets", "foundry-template");
+
+function usage() {
+  return `Usage:
+  token-deployer normalize <request.json> [--out <path>]
+  token-deployer scaffold <request.json> [--target-dir <dir>] [--force]
+  token-deployer deploy <request.json> [--target-dir <dir>] [--force] [--broadcast] [--verify] [--rpc-url <url>] [--private-key <hex>]
+
+Notes:
+  - deploy without --broadcast performs scaffold + forge build + forge test + forge script simulation
+  - deploy with --broadcast also submits the transaction and writes a deployment manifest
+  - request.json should match the fields described in SKILL.md and references/hermes-runtime.md
+`;
+}
+
+function parseArgs(argv) {
+  const [command, ...rest] = argv;
+  if (!command || command === "--help" || command === "-h" || command === "help") {
+    return { command: "help" };
+  }
+
+  const positional = [];
+  const options = {};
+
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (!token.startsWith("--")) {
+      positional.push(token);
+      continue;
+    }
+
+    const key = token.slice(2);
+    if (["force", "broadcast", "verify"].includes(key)) {
+      options[key] = true;
+      continue;
+    }
+
+    const value = rest[i + 1];
+    if (value === undefined) {
+      throw new Error(`missing value for --${key}`);
+    }
+    options[key] = value;
+    i += 1;
+  }
+
+  return { command, positional, options };
+}
+
+function runCommand(command, args, { cwd = ROOT_DIR, env = process.env } = {}) {
+  const result = spawnSync(command, args, {
+    cwd,
+    env,
+    encoding: "utf8",
+  });
+
+  if (result.error && result.status === null) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    const message = [
+      `${command} ${args.join(" ")} failed with exit code ${result.status}`,
+      result.stdout?.trim(),
+      result.stderr?.trim(),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    throw new Error(message);
+  }
+
+  return result.stdout;
+}
+
+function resolvePython() {
+  for (const candidate of ["python3", "python"]) {
+    const probe = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+    if (probe.status === 0) {
+      return candidate;
+    }
+  }
+  throw new Error("python3 or python is required to run the request normalizer");
+}
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function writeJson(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function slugify(value) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
+function normalizeRequest(requestPath, outPath) {
+  const python = resolvePython();
+  const args = [NORMALIZER_PATH, requestPath];
+  if (outPath) {
+    args.push("--out", outPath);
+    runCommand(python, args);
+    return readJson(outPath);
+  }
+
+  const stdout = runCommand(python, args);
+  return JSON.parse(stdout);
+}
+
+function ensureDirectory(targetDir, { force = false } = {}) {
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+    return;
+  }
+
+  const entries = fs.readdirSync(targetDir);
+  if (entries.length > 0 && !force) {
+    throw new Error(`target directory is not empty: ${targetDir}. Pass --force to reuse it.`);
+  }
+
+  if (entries.length > 0 && force) {
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+}
+
+function buildWorkspaceDir(normalized, targetDir) {
+  if (targetDir) {
+    return path.resolve(targetDir);
+  }
+
+  const slug = slugify(`${normalized.standard}-${normalized.name}`);
+  return path.join(os.tmpdir(), "defi-token-deployer", slug);
+}
+
+function buildEnvTemplate(normalized) {
+  const lines = [
+    "# Non-secret values generated from the normalized request.",
+    "# Provide RPC_URL and PRIVATE_KEY at runtime instead of storing them here.",
+    "",
+  ];
+
+  if (normalized.standard === "erc20") {
+    lines.push(`ERC20_NAME=${normalized.name}`);
+    lines.push(`ERC20_SYMBOL=${normalized.symbol}`);
+    lines.push(`ERC20_DECIMALS=${normalized.decimals}`);
+    lines.push(`INITIAL_OWNER=${normalized.owner}`);
+    lines.push(`INITIAL_RECIPIENT=${normalized.initialRecipient}`);
+    lines.push(`INITIAL_SUPPLY=${normalized.initialSupply}`);
+    lines.push(`ERC20_MINTING_ENABLED=${normalized.features.mintable ? "true" : "false"}`);
+  } else {
+    lines.push(`ERC721_NAME=${normalized.name}`);
+    lines.push(`ERC721_SYMBOL=${normalized.symbol}`);
+    lines.push(`INITIAL_OWNER=${normalized.owner}`);
+    lines.push(`ERC721_BASE_URI=${normalized.baseURI ?? ""}`);
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function buildRuntimeEnv(normalized, options) {
+  const env = { ...process.env };
+  const rpcUrl = options["rpc-url"] ?? process.env.RPC_URL;
+  const requestedPrivateKey = options["private-key"] ?? process.env.PRIVATE_KEY;
+  const simulationPrivateKey =
+    requestedPrivateKey ??
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+  if (rpcUrl) {
+    env.RPC_URL = rpcUrl;
+  }
+
+  env.PRIVATE_KEY = options.broadcast ? requestedPrivateKey ?? "" : simulationPrivateKey;
+
+  if (normalized.standard === "erc20") {
+    env.ERC20_NAME = normalized.name;
+    env.ERC20_SYMBOL = normalized.symbol;
+    env.ERC20_DECIMALS = String(normalized.decimals);
+    env.INITIAL_OWNER = normalized.owner;
+    env.INITIAL_RECIPIENT = normalized.initialRecipient;
+    env.INITIAL_SUPPLY = normalized.initialSupply ?? "0";
+    env.ERC20_MINTING_ENABLED = normalized.features.mintable ? "true" : "false";
+  } else {
+    env.ERC721_NAME = normalized.name;
+    env.ERC721_SYMBOL = normalized.symbol;
+    env.INITIAL_OWNER = normalized.owner;
+    env.ERC721_BASE_URI = normalized.baseURI ?? "";
+  }
+
+  return env;
+}
+
+function buildDeployCommand(normalized, options) {
+  const scriptSpec =
+    normalized.standard === "erc20"
+      ? "script/DeployDefiCompatibleERC20.s.sol:DeployDefiCompatibleERC20"
+      : "script/DeployDefiCompatibleERC721.s.sol:DeployDefiCompatibleERC721";
+
+  const args = ["script", scriptSpec];
+  if (options["rpc-url"]) {
+    args.push("--rpc-url", options["rpc-url"]);
+  }
+  if (options.broadcast) {
+    args.push("--broadcast");
+  }
+  if (options.verify) {
+    args.push("--verify");
+  }
+  return args;
+}
+
+function scaffoldWorkspace(requestPath, options = {}) {
+  const normalized = normalizeRequest(requestPath);
+  if (normalized.blockingIssues?.length) {
+    const error = new Error("request is blocked by compatibility issues");
+    error.details = normalized;
+    throw error;
+  }
+
+  const workspaceDir = buildWorkspaceDir(normalized, options["target-dir"]);
+  ensureDirectory(workspaceDir, { force: Boolean(options.force) });
+  fs.cpSync(TEMPLATE_DIR, workspaceDir, { recursive: true, force: true });
+
+  const requestCopyPath = path.join(workspaceDir, "token-deployer.request.json");
+  const normalizedPath = path.join(workspaceDir, "token-deployer.normalized.json");
+  const envTemplatePath = path.join(workspaceDir, ".env.token-deployer");
+
+  fs.copyFileSync(path.resolve(requestPath), requestCopyPath);
+  writeJson(normalizedPath, normalized);
+  fs.writeFileSync(envTemplatePath, buildEnvTemplate(normalized));
+
+  const result = {
+    status: "scaffolded",
+    standard: normalized.standard,
+    workspaceDir,
+    requestPath: requestCopyPath,
+    normalizedPath,
+    envTemplatePath,
+    buildCommand: ["forge", "build"],
+    testCommand: ["forge", "test"],
+    deployCommand: ["forge", ...buildDeployCommand(normalized, options)],
+    warnings: normalized.warnings ?? [],
+    compatibility: normalized.compatibility,
+  };
+
+  return { normalized, workspaceDir, envTemplatePath, result };
+}
+
+function findLatestBroadcastArtifact(workspaceDir, normalized) {
+  const scriptDir =
+    normalized.standard === "erc20" ? "DeployDefiCompatibleERC20.s.sol" : "DeployDefiCompatibleERC721.s.sol";
+  const baseDir = path.join(workspaceDir, "broadcast", scriptDir);
+  if (!fs.existsSync(baseDir)) {
+    return null;
+  }
+
+  const preferredChainDir =
+    normalized.chainId !== null && normalized.chainId !== undefined
+      ? path.join(baseDir, String(normalized.chainId), "run-latest.json")
+      : null;
+  if (preferredChainDir && fs.existsSync(preferredChainDir)) {
+    return preferredChainDir;
+  }
+
+  const candidates = [];
+  for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const candidate = path.join(baseDir, entry.name, "run-latest.json");
+    if (fs.existsSync(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+
+  candidates.sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+  return candidates[0] ?? null;
+}
+
+function extractDeploymentFromArtifact(artifactPath) {
+  const artifact = readJson(artifactPath);
+  const transactions = Array.isArray(artifact.transactions) ? artifact.transactions : [];
+  const createTx = [...transactions].reverse().find((item) => item.transactionType === "CREATE");
+
+  return {
+    artifactPath,
+    txHash: createTx?.hash ?? null,
+    deployedAddress: createTx?.contractAddress ?? null,
+  };
+}
+
+function deployRequest(requestPath, options = {}) {
+  const { normalized, workspaceDir, envTemplatePath, result } = scaffoldWorkspace(requestPath, options);
+  const env = buildRuntimeEnv(normalized, options);
+  const broadcast = Boolean(options.broadcast);
+
+  if (broadcast && !env.RPC_URL) {
+    throw new Error("broadcast requires --rpc-url or RPC_URL");
+  }
+  if (broadcast && !env.PRIVATE_KEY) {
+    throw new Error("broadcast requires --private-key or PRIVATE_KEY");
+  }
+
+  runCommand("forge", ["build"], { cwd: workspaceDir, env });
+  runCommand("forge", ["test"], { cwd: workspaceDir, env });
+  runCommand("forge", buildDeployCommand(normalized, options), { cwd: workspaceDir, env });
+
+  let deployment = {
+    txHash: null,
+    deployedAddress: null,
+    artifactPath: null,
+  };
+
+  if (broadcast) {
+    const artifactPath = findLatestBroadcastArtifact(workspaceDir, normalized);
+    if (artifactPath) {
+      deployment = extractDeploymentFromArtifact(artifactPath);
+    }
+  }
+
+  const chainSlug = normalized.chainName ? slugify(normalized.chainName) : String(normalized.chainId ?? "unknown");
+  const manifestPath = path.join(workspaceDir, "deployments", chainSlug, `${slugify(normalized.name)}.json`);
+
+  const manifest = {
+    status: broadcast ? "deployed" : "simulated",
+    standard: normalized.standard,
+    name: normalized.name,
+    symbol: normalized.symbol,
+    chainId: normalized.chainId ?? null,
+    chainName: normalized.chainName ?? null,
+    workspaceDir,
+    envTemplatePath,
+    requestPath: result.requestPath,
+    normalizedPath: result.normalizedPath,
+    contractName: normalized.contractName,
+    deployer: broadcast ? null : "simulation",
+    owner: normalized.owner,
+    constructorArgs:
+      normalized.standard === "erc20"
+        ? {
+            name: normalized.name,
+            symbol: normalized.symbol,
+            decimals: normalized.decimals,
+            initialOwner: normalized.owner,
+            initialRecipient: normalized.initialRecipient,
+            initialSupply: normalized.initialSupply,
+            mintingEnabled: normalized.features.mintable,
+          }
+        : {
+            name: normalized.name,
+            symbol: normalized.symbol,
+            initialOwner: normalized.owner,
+            baseURI: normalized.baseURI ?? "",
+          },
+    deployCommand: ["forge", ...buildDeployCommand(normalized, options)],
+    verification: {
+      requested: Boolean(options.verify),
+      status: options.verify && broadcast ? "requested-via-forge" : "not-requested",
+    },
+    warnings: normalized.warnings ?? [],
+    compatibility: normalized.compatibility,
+    txHash: deployment.txHash,
+    deployedAddress: deployment.deployedAddress,
+    artifactPath: deployment.artifactPath,
+  };
+
+  writeJson(manifestPath, manifest);
+  manifest.manifestPath = manifestPath;
+  return manifest;
+}
+
+function printJson(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function printError(error) {
+  const payload = {
+    status: "error",
+    message: error.message,
+    details: error.details ?? null,
+  };
+  process.stderr.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function main() {
+  try {
+    const parsed = parseArgs(process.argv.slice(2));
+
+    if (parsed.command === "help") {
+      process.stdout.write(usage());
+      return;
+    }
+
+    const requestPath = parsed.positional[0];
+    if (!requestPath) {
+      throw new Error("request.json path is required");
+    }
+
+    if (parsed.command === "normalize") {
+      const normalized = normalizeRequest(requestPath, parsed.options.out);
+      if (!parsed.options.out) {
+        printJson(normalized);
+      }
+      return;
+    }
+
+    if (parsed.command === "scaffold") {
+      const result = scaffoldWorkspace(requestPath, parsed.options).result;
+      printJson(result);
+      return;
+    }
+
+    if (parsed.command === "deploy") {
+      const manifest = deployRequest(requestPath, parsed.options);
+      printJson(manifest);
+      return;
+    }
+
+    throw new Error(`unknown command: ${parsed.command}`);
+  } catch (error) {
+    printError(error);
+    process.exit(1);
+  }
+}
+
+main();

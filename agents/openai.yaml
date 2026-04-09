@@ -1,0 +1,4 @@
+interface:
+  display_name: "DeFi Token Deployer"
+  short_description: "Deploy ERC20/ERC721 for Ajna and Uniswap"
+  default_prompt: "Use $defi-token-deployer to deploy a Foundry-first ERC20 or ERC721 that stays boring enough for Ajna and Uniswap integrations."
