@@ -64,8 +64,10 @@ abstract contract MinimalERC20 {
             revert ERC20InsufficientAllowance(msg.sender, currentAllowance, value);
         }
 
-        unchecked {
-            _approve(from, msg.sender, currentAllowance - value);
+        if (currentAllowance != type(uint256).max) {
+            unchecked {
+                _approve(from, msg.sender, currentAllowance - value);
+            }
         }
 
         _transfer(from, to, value);

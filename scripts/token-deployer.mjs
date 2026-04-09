@@ -110,6 +110,11 @@ function slugify(value) {
     .replace(/-{2,}/g, "-");
 }
 
+function shellQuote(value) {
+  const stringValue = String(value ?? "");
+  return `'${stringValue.replace(/'/g, `'\"'\"'`)}'`;
+}
+
 function normalizeRequest(requestPath, outPath) {
   const python = resolvePython();
   const args = [NORMALIZER_PATH, requestPath];
@@ -121,6 +126,14 @@ function normalizeRequest(requestPath, outPath) {
 
   const stdout = runCommand(python, args);
   return JSON.parse(stdout);
+}
+
+function resolveRpcUrl(options = {}) {
+  return options["rpc-url"] ?? process.env.RPC_URL ?? null;
+}
+
+function resolvePrivateKey(options = {}) {
+  return options["private-key"] ?? process.env.PRIVATE_KEY ?? null;
 }
 
 function ensureDirectory(targetDir, { force = false } = {}) {
@@ -157,18 +170,18 @@ function buildEnvTemplate(normalized) {
   ];
 
   if (normalized.standard === "erc20") {
-    lines.push(`ERC20_NAME=${normalized.name}`);
-    lines.push(`ERC20_SYMBOL=${normalized.symbol}`);
-    lines.push(`ERC20_DECIMALS=${normalized.decimals}`);
-    lines.push(`INITIAL_OWNER=${normalized.owner}`);
-    lines.push(`INITIAL_RECIPIENT=${normalized.initialRecipient}`);
-    lines.push(`INITIAL_SUPPLY=${normalized.initialSupply}`);
-    lines.push(`ERC20_MINTING_ENABLED=${normalized.features.mintable ? "true" : "false"}`);
+    lines.push(`ERC20_NAME=${shellQuote(normalized.name)}`);
+    lines.push(`ERC20_SYMBOL=${shellQuote(normalized.symbol)}`);
+    lines.push(`ERC20_DECIMALS=${shellQuote(normalized.decimals)}`);
+    lines.push(`INITIAL_OWNER=${shellQuote(normalized.owner)}`);
+    lines.push(`INITIAL_RECIPIENT=${shellQuote(normalized.initialRecipient)}`);
+    lines.push(`INITIAL_SUPPLY=${shellQuote(normalized.initialSupply)}`);
+    lines.push(`ERC20_MINTING_ENABLED=${shellQuote(normalized.features.mintable ? "true" : "false")}`);
   } else {
-    lines.push(`ERC721_NAME=${normalized.name}`);
-    lines.push(`ERC721_SYMBOL=${normalized.symbol}`);
-    lines.push(`INITIAL_OWNER=${normalized.owner}`);
-    lines.push(`ERC721_BASE_URI=${normalized.baseURI ?? ""}`);
+    lines.push(`ERC721_NAME=${shellQuote(normalized.name)}`);
+    lines.push(`ERC721_SYMBOL=${shellQuote(normalized.symbol)}`);
+    lines.push(`INITIAL_OWNER=${shellQuote(normalized.owner)}`);
+    lines.push(`ERC721_BASE_URI=${shellQuote(normalized.baseURI ?? "")}`);
   }
 
   return `${lines.join("\n")}\n`;
@@ -176,8 +189,8 @@ function buildEnvTemplate(normalized) {
 
 function buildRuntimeEnv(normalized, options) {
   const env = { ...process.env };
-  const rpcUrl = options["rpc-url"] ?? process.env.RPC_URL;
-  const requestedPrivateKey = options["private-key"] ?? process.env.PRIVATE_KEY;
+  const rpcUrl = resolveRpcUrl(options);
+  const requestedPrivateKey = resolvePrivateKey(options);
   const simulationPrivateKey =
     requestedPrivateKey ??
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -203,23 +216,23 @@ function buildRuntimeEnv(normalized, options) {
     env.ERC721_BASE_URI = normalized.baseURI ?? "";
   }
 
-  return env;
+  return { env, rpcUrl, requestedPrivateKey };
 }
 
-function buildDeployCommand(normalized, options) {
+function buildDeployCommand(normalized, { rpcUrl = null, broadcast = false, verify = false } = {}) {
   const scriptSpec =
     normalized.standard === "erc20"
       ? "script/DeployDefiCompatibleERC20.s.sol:DeployDefiCompatibleERC20"
       : "script/DeployDefiCompatibleERC721.s.sol:DeployDefiCompatibleERC721";
 
   const args = ["script", scriptSpec];
-  if (options["rpc-url"]) {
-    args.push("--rpc-url", options["rpc-url"]);
+  if (rpcUrl) {
+    args.push("--rpc-url", rpcUrl);
   }
-  if (options.broadcast) {
+  if (broadcast) {
     args.push("--broadcast");
   }
-  if (options.verify) {
+  if (verify) {
     args.push("--verify");
   }
   return args;
@@ -254,7 +267,14 @@ function scaffoldWorkspace(requestPath, options = {}) {
     envTemplatePath,
     buildCommand: ["forge", "build"],
     testCommand: ["forge", "test"],
-    deployCommand: ["forge", ...buildDeployCommand(normalized, options)],
+    deployCommand: [
+      "forge",
+      ...buildDeployCommand(normalized, {
+        rpcUrl: resolveRpcUrl(options),
+        broadcast: Boolean(options.broadcast),
+        verify: Boolean(options.verify),
+      }),
+    ],
     warnings: normalized.warnings ?? [],
     compatibility: normalized.compatibility,
   };
@@ -307,19 +327,23 @@ function extractDeploymentFromArtifact(artifactPath) {
 
 function deployRequest(requestPath, options = {}) {
   const { normalized, workspaceDir, envTemplatePath, result } = scaffoldWorkspace(requestPath, options);
-  const env = buildRuntimeEnv(normalized, options);
+  const { env, rpcUrl, requestedPrivateKey } = buildRuntimeEnv(normalized, options);
   const broadcast = Boolean(options.broadcast);
+  const verify = Boolean(options.verify);
 
-  if (broadcast && !env.RPC_URL) {
+  if (broadcast && !rpcUrl) {
     throw new Error("broadcast requires --rpc-url or RPC_URL");
   }
-  if (broadcast && !env.PRIVATE_KEY) {
+  if (broadcast && !requestedPrivateKey) {
     throw new Error("broadcast requires --private-key or PRIVATE_KEY");
   }
 
   runCommand("forge", ["build"], { cwd: workspaceDir, env });
   runCommand("forge", ["test"], { cwd: workspaceDir, env });
-  runCommand("forge", buildDeployCommand(normalized, options), { cwd: workspaceDir, env });
+  runCommand("forge", buildDeployCommand(normalized, { rpcUrl, broadcast, verify }), {
+    cwd: workspaceDir,
+    env,
+  });
 
   let deployment = {
     txHash: null,
@@ -331,6 +355,9 @@ function deployRequest(requestPath, options = {}) {
     const artifactPath = findLatestBroadcastArtifact(workspaceDir, normalized);
     if (artifactPath) {
       deployment = extractDeploymentFromArtifact(artifactPath);
+    }
+    if (!deployment.artifactPath || !deployment.txHash || !deployment.deployedAddress) {
+      throw new Error("broadcast completed without a parseable deployment artifact");
     }
   }
 
@@ -368,10 +395,10 @@ function deployRequest(requestPath, options = {}) {
             initialOwner: normalized.owner,
             baseURI: normalized.baseURI ?? "",
           },
-    deployCommand: ["forge", ...buildDeployCommand(normalized, options)],
+    deployCommand: ["forge", ...buildDeployCommand(normalized, { rpcUrl, broadcast, verify })],
     verification: {
-      requested: Boolean(options.verify),
-      status: options.verify && broadcast ? "requested-via-forge" : "not-requested",
+      requested: verify,
+      status: verify && broadcast ? "requested-via-forge" : "not-requested",
     },
     warnings: normalized.warnings ?? [],
     compatibility: normalized.compatibility,
@@ -439,4 +466,17 @@ function main() {
   }
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main();
+}
+
+export {
+  buildDeployCommand,
+  buildEnvTemplate,
+  deployRequest,
+  extractDeploymentFromArtifact,
+  normalizeRequest,
+  resolvePrivateKey,
+  resolveRpcUrl,
+  shellQuote,
+};

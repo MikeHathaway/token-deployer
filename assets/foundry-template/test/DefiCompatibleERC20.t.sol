@@ -39,4 +39,18 @@ contract DefiCompatibleERC20Test is TestBase {
         vm.expectRevert(DefiCompatibleERC20.MintingDisabled.selector);
         token.mint(other, 1 ether);
     }
+
+    function test_transfer_from_keeps_max_allowance() public {
+        DefiCompatibleERC20 token =
+            new DefiCompatibleERC20("Acme Token", "ACME", 18, owner, recipient, 10 ether, false);
+
+        vm.prank(recipient);
+        token.approve(other, type(uint256).max);
+
+        vm.prank(other);
+        token.transferFrom(recipient, other, 1 ether);
+
+        assertEq(token.allowance(recipient, other), type(uint256).max);
+        assertEq(token.balanceOf(other), 1 ether);
+    }
 }

@@ -83,6 +83,27 @@ def normalize_decimals(raw: Any, warnings: list[str], blocking_issues: list[str]
     return value
 
 
+def normalize_uint_string(
+    raw: Any, field_name: str, blocking_issues: list[str], *, required: bool = False
+) -> str | None:
+    if raw is None:
+        if required:
+            blocking_issues.append(f"{field_name} is required")
+        return None
+
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        blocking_issues.append(f"{field_name} must be a non-negative integer")
+        return None
+
+    if value < 0:
+        blocking_issues.append(f"{field_name} must be a non-negative integer")
+        return None
+
+    return str(value)
+
+
 def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
     blocking_issues: list[str] = []
@@ -101,9 +122,9 @@ def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
         data.get("initialRecipient"), "initialRecipient", blocking_issues
     )
 
-    initial_supply = data.get("initialSupply")
-    if initial_supply is None:
-        blocking_issues.append("initialSupply is required for ERC20 deployments")
+    initial_supply = normalize_uint_string(
+        data.get("initialSupply"), "initialSupply", blocking_issues, required=True
+    )
 
     decimals = normalize_decimals(data.get("decimals"), warnings, blocking_issues)
     minting_enabled = read_bool(data, "mintable")
@@ -141,7 +162,7 @@ def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
         "contractName": pascal_case(str(name)),
         "owner": owner,
         "initialRecipient": initial_recipient,
-        "initialSupply": str(initial_supply) if initial_supply is not None else None,
+        "initialSupply": initial_supply,
         "decimals": decimals,
         "features": {
             "mintable": minting_enabled,

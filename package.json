@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "CLI and skill for rapidly deploying DeFi-compatible ERC20 and ERC721 tokens.",
   "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "test:contracts": "cd assets/foundry-template && forge test",
+    "test:all": "npm test && npm run test:contracts"
+  },
   "bin": {
     "token-deployer": "./bin/token-deployer"
   }
