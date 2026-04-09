@@ -213,6 +213,10 @@ function resolveChainMetadata(normalized, { broadcast = false, actualChainId = n
   const requestedChainName = normalizeChainName(normalized.chainName);
   const warnings = [];
 
+  if (requestedChainId === null && requestedChainName === null) {
+    throw new Error("request chainId or chainName is required");
+  }
+
   if (!broadcast) {
     const chainName = requestedChainName ?? getKnownChainName(requestedChainId);
     return {

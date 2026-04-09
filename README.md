@@ -17,6 +17,7 @@ to call one command with JSON in and JSON out, the CLI is the stable interface.
 - normalizes token deployment requests
 - rejects obviously incompatible token features like fee-on-transfer or
   soulbound behavior
+- blocks requests that omit both `chainId` and `chainName`
 - blocks `permit: true` requests until a dedicated permit-capable ERC20 template
   exists
 - scaffolds a self-contained Foundry workspace

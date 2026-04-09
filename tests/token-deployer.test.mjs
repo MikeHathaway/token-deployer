@@ -96,6 +96,13 @@ test("resolveChainMetadata rejects chainName-only mismatches", () => {
   );
 });
 
+test("resolveChainMetadata requires a request chain selector", () => {
+  assert.throws(
+    () => resolveChainMetadata({}, { broadcast: true, actualChainId: 31337 }),
+    /request chainId or chainName is required/,
+  );
+});
+
 test("resolveChainMetadata rejects unverifiable chainName on unmapped broadcast chains", () => {
   assert.throws(
     () => resolveChainMetadata({ chainId: 56, chainName: "base" }, { broadcast: true, actualChainId: 56 }),
@@ -184,4 +191,27 @@ test("normalizeRequest blocks permit until a permit-capable template exists", ()
     normalized.blockingIssues.join("\n"),
     /permit=true is not supported by the bundled ERC20 template/,
   );
+});
+
+test("normalizeRequest blocks requests that omit both chainId and chainName", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "No Chain Binding",
+      symbol: "NCB",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      mintable: false,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(normalized.blockingIssues.join("\n"), /chainId or chainName is required/);
 });

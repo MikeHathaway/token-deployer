@@ -104,6 +104,13 @@ def normalize_uint_string(
     return str(value)
 
 
+def normalize_optional_string(raw: Any) -> Any:
+    if isinstance(raw, str):
+        trimmed = raw.strip()
+        return trimmed if trimmed else None
+    return raw
+
+
 def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
     blocking_issues: list[str] = []
@@ -303,8 +310,14 @@ def main() -> int:
     else:
         result = build_erc721_result(data)
 
-    result["chainId"] = data.get("chainId")
-    result["chainName"] = data.get("chainName")
+    chain_id = normalize_optional_string(data.get("chainId"))
+    chain_name = normalize_optional_string(data.get("chainName"))
+    has_chain_name = isinstance(chain_name, str)
+    if chain_id is None and not has_chain_name:
+        blocking_issues.append("chainId or chainName is required")
+
+    result["chainId"] = chain_id
+    result["chainName"] = chain_name
     result["requestedBy"] = data.get("requestedBy", "autonomous-agent")
     result["normalizedAt"] = "manual-run"
 
