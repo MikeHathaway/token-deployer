@@ -121,6 +121,9 @@ forge script script/DeployDefiCompatibleERC721.s.sol:DeployDefiCompatibleERC721 
   user still expects Ajna or Uniswap compatibility.
 - Stop if the chain, owner, supply, recipient, base URI, or verification target
   is missing.
+- Stop if a broadcast request includes `chainName` for a chain id that the tool
+  cannot map canonically yet. For unknown chains, prefer explicit `chainId` and
+  let the manifest use the numeric chain slug.
 - Stop if build or tests fail.
 - Stop if deployment succeeds but verification or smoke checks disagree with
   the intended config.

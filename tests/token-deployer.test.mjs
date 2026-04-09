@@ -96,6 +96,22 @@ test("resolveChainMetadata rejects chainName-only mismatches", () => {
   );
 });
 
+test("resolveChainMetadata rejects unverifiable chainName on unmapped broadcast chains", () => {
+  assert.throws(
+    () => resolveChainMetadata({ chainId: 56, chainName: "base" }, { broadcast: true, actualChainId: 56 }),
+    /request chainName "base" cannot be verified for RPC chainId 56; omit chainName or add a canonical mapping before broadcast/,
+  );
+});
+
+test("resolveChainMetadata uses chainId slug for unmapped broadcast chains without chainName", () => {
+  const resolved = resolveChainMetadata({ chainId: 56 }, { broadcast: true, actualChainId: 56 });
+
+  assert.equal(resolved.chainId, 56);
+  assert.equal(resolved.chainName, null);
+  assert.equal(resolved.chainSlug, "56");
+  assert.deepEqual(resolved.warnings, []);
+});
+
 test("chainNamesMatch normalizes case and spacing", () => {
   assert.equal(chainNamesMatch("Base", "base"), true);
   assert.equal(chainNamesMatch("  base  ", "base"), true);

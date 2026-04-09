@@ -71,6 +71,8 @@ Return JSON with at least these keys:
 - Stop if `forge build` or `forge test` fails.
 - Stop if explorer verification fails and the operator asked for verified source.
 - Stop if the requested `chainId` or `chainName` disagrees with the selected RPC.
+- Stop if the operator supplies `chainName` for a broadcast chain whose canonical
+  name is unknown to the tool; use `chainId` only or extend the chain map first.
 - Stop if smoke checks return different config than the requested config.
 
 ## Handoff rules

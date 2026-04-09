@@ -159,6 +159,9 @@ Runs the full flow:
 - real deployment requires `--broadcast`
 - broadcast fails closed if the request `chainId` or `chainName` does not match
   the RPC chain
+- if the RPC chain id is not in the bundled canonical chain map, broadcasts must
+  rely on `chainId`; request-sourced `chainName` is rejected instead of being
+  copied into the manifest
 - broadcast manifests use the actual broadcast chain instead of request-sourced
   chain metadata
 

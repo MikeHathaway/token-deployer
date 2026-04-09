@@ -232,13 +232,18 @@ function resolveChainMetadata(normalized, { broadcast = false, actualChainId = n
   }
 
   const canonicalChainName = getKnownChainName(actualChainId);
+  if (requestedChainName && !canonicalChainName) {
+    throw new Error(
+      `request chainName "${requestedChainName}" cannot be verified for RPC chainId ${actualChainId}; omit chainName or add a canonical mapping before broadcast`,
+    );
+  }
   if (requestedChainName && canonicalChainName && !chainNamesMatch(requestedChainName, canonicalChainName)) {
     throw new Error(
       `request chainName "${requestedChainName}" does not match RPC chain "${canonicalChainName}" for chainId ${actualChainId}`,
     );
   }
 
-  const chainName = canonicalChainName ?? requestedChainName;
+  const chainName = canonicalChainName;
   return {
     chainId: actualChainId,
     chainName,
