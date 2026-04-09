@@ -32,7 +32,8 @@ Use this checklist when the request includes `Ajna`, `Uniswap`, `DEX`,
 - Non-18 decimals can work, but integrations and operators make more mistakes.
 - Owner minting changes supply assumptions. Call it out.
 - Upgradeable proxies add operational risk. Use only when explicitly required.
-- Permit is optional. Add it only when the downstream flow benefits from it.
+- The bundled template does not implement permit. Treat `permit: true` requests
+  as out of scope unless you add a dedicated ERC20Permit variant.
 
 ## ERC721 safe defaults for Ajna and standard NFT tooling
 

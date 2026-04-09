@@ -1,7 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { buildDeployCommand, buildEnvTemplate } from "../scripts/token-deployer.mjs";
+import {
+  buildDeployCommand,
+  buildEnvTemplate,
+  chainNamesMatch,
+  extractDeploymentFromArtifact,
+  fetchRpcChainId,
+  normalizeRequest,
+  resolveChainMetadata,
+} from "../scripts/token-deployer.mjs";
 
 test("buildEnvTemplate shell-quotes values with spaces", () => {
   const template = buildEnvTemplate({
@@ -48,4 +59,113 @@ test("buildDeployCommand includes rpc-url when resolved from env or flags", () =
     "--broadcast",
     "--verify",
   ]);
+});
+
+test("fetchRpcChainId parses hex chain ids from JSON-RPC", async () => {
+  const chainId = await fetchRpcChainId("http://rpc.example", async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return { jsonrpc: "2.0", id: 1, result: "0x2105" };
+    },
+  }));
+
+  assert.equal(chainId, 8453);
+});
+
+test("resolveChainMetadata uses canonical broadcast chain metadata", () => {
+  const resolved = resolveChainMetadata({ chainId: "8453", chainName: "base" }, { broadcast: true, actualChainId: 8453 });
+
+  assert.equal(resolved.chainId, 8453);
+  assert.equal(resolved.chainName, "base");
+  assert.equal(resolved.chainSlug, "base");
+  assert.deepEqual(resolved.warnings, []);
+});
+
+test("resolveChainMetadata rejects RPC and request chain mismatches", () => {
+  assert.throws(
+    () => resolveChainMetadata({ chainId: 8453 }, { broadcast: true, actualChainId: 31337 }),
+    /request chainId 8453 does not match RPC chainId 31337/,
+  );
+});
+
+test("resolveChainMetadata rejects chainName-only mismatches", () => {
+  assert.throws(
+    () => resolveChainMetadata({ chainName: "base" }, { broadcast: true, actualChainId: 31337 }),
+    /request chainName "base" does not match RPC chain "anvil" for chainId 31337/,
+  );
+});
+
+test("chainNamesMatch normalizes case and spacing", () => {
+  assert.equal(chainNamesMatch("Base", "base"), true);
+  assert.equal(chainNamesMatch("  base  ", "base"), true);
+  assert.equal(chainNamesMatch("base", "anvil"), false);
+});
+
+test("extractDeploymentFromArtifact returns deployer and chain metadata", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-artifact-"));
+  const artifactPath = path.join(tempDir, "run-latest.json");
+  fs.writeFileSync(
+    artifactPath,
+    JSON.stringify(
+      {
+        chain: 31337,
+        transactions: [
+          {
+            hash: "0xabc",
+            transactionType: "CREATE",
+            contractAddress: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+            transaction: {
+              from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              chainId: "0x7a69",
+            },
+          },
+        ],
+        receipts: [
+          {
+            from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            contractAddress: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+
+  const deployment = extractDeploymentFromArtifact(artifactPath);
+  assert.equal(deployment.txHash, "0xabc");
+  assert.equal(deployment.deployedAddress, "0x5FbDB2315678afecb367f032d93F642f64180aa3");
+  assert.equal(deployment.deployer, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+  assert.equal(deployment.chainId, 31337);
+});
+
+test("normalizeRequest blocks permit until a permit-capable template exists", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Permit Token",
+      symbol: "PERMIT",
+      chainId: 8453,
+      chainName: "base",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      mintable: false,
+      permit: true,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.features.permit, true);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(
+    normalized.blockingIssues.join("\n"),
+    /permit=true is not supported by the bundled ERC20 template/,
+  );
 });

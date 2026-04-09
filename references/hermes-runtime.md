@@ -70,6 +70,7 @@ Return JSON with at least these keys:
   `references/compatibility-checklist.md`.
 - Stop if `forge build` or `forge test` fails.
 - Stop if explorer verification fails and the operator asked for verified source.
+- Stop if the requested `chainId` or `chainName` disagrees with the selected RPC.
 - Stop if smoke checks return different config than the requested config.
 
 ## Handoff rules

@@ -11,6 +11,15 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const NORMALIZER_PATH = path.join(ROOT_DIR, "scripts", "normalize_token_config.py");
 const TEMPLATE_DIR = path.join(ROOT_DIR, "assets", "foundry-template");
+const KNOWN_CHAIN_NAMES = new Map([
+  [1, "ethereum"],
+  [10, "optimism"],
+  [137, "polygon"],
+  [8453, "base"],
+  [42161, "arbitrum"],
+  [11155111, "sepolia"],
+  [31337, "anvil"],
+]);
 
 function usage() {
   return `Usage:
@@ -113,6 +122,129 @@ function slugify(value) {
 function shellQuote(value) {
   const stringValue = String(value ?? "");
   return `'${stringValue.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function normalizeChainName(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseChainId(value, fieldName = "chainId") {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    if (Number.isSafeInteger(value) && value >= 0) {
+      return value;
+    }
+    throw new Error(`${fieldName} must be a non-negative integer`);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+
+    let parsed = Number.NaN;
+    if (/^0x[0-9a-fA-F]+$/.test(trimmed)) {
+      parsed = Number.parseInt(trimmed, 16);
+    } else if (/^\d+$/.test(trimmed)) {
+      parsed = Number.parseInt(trimmed, 10);
+    }
+
+    if (Number.isSafeInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+
+  throw new Error(`${fieldName} must be a non-negative integer`);
+}
+
+function getKnownChainName(chainId) {
+  if (chainId === null) {
+    return null;
+  }
+  return KNOWN_CHAIN_NAMES.get(chainId) ?? null;
+}
+
+function chainNamesMatch(requestedChainName, actualChainName) {
+  return slugify(requestedChainName) === slugify(actualChainName);
+}
+
+async function fetchRpcChainId(rpcUrl, fetchImpl = globalThis.fetch) {
+  if (typeof fetchImpl !== "function") {
+    throw new Error("global fetch is required to resolve the RPC chainId");
+  }
+
+  const response = await fetchImpl(rpcUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_chainId",
+      params: [],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`RPC chainId lookup failed with HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (payload?.error) {
+    const reason = payload.error.message ?? JSON.stringify(payload.error);
+    throw new Error(`RPC chainId lookup failed: ${reason}`);
+  }
+
+  return parseChainId(payload?.result, "RPC chainId");
+}
+
+function resolveChainMetadata(normalized, { broadcast = false, actualChainId = null } = {}) {
+  const requestedChainId = parseChainId(normalized.chainId, "chainId");
+  const requestedChainName = normalizeChainName(normalized.chainName);
+  const warnings = [];
+
+  if (!broadcast) {
+    const chainName = requestedChainName ?? getKnownChainName(requestedChainId);
+    return {
+      chainId: requestedChainId,
+      chainName,
+      chainSlug: chainName ? slugify(chainName) : String(requestedChainId ?? "unknown"),
+      warnings,
+    };
+  }
+
+  if (actualChainId === null) {
+    throw new Error("broadcast requires an authoritative RPC chainId");
+  }
+
+  if (requestedChainId !== null && requestedChainId !== actualChainId) {
+    throw new Error(`request chainId ${requestedChainId} does not match RPC chainId ${actualChainId}`);
+  }
+
+  const canonicalChainName = getKnownChainName(actualChainId);
+  if (requestedChainName && canonicalChainName && !chainNamesMatch(requestedChainName, canonicalChainName)) {
+    throw new Error(
+      `request chainName "${requestedChainName}" does not match RPC chain "${canonicalChainName}" for chainId ${actualChainId}`,
+    );
+  }
+
+  const chainName = canonicalChainName ?? requestedChainName;
+  return {
+    chainId: actualChainId,
+    chainName,
+    chainSlug: chainName ? slugify(chainName) : String(actualChainId),
+    warnings,
+  };
 }
 
 function normalizeRequest(requestPath, outPath) {
@@ -282,7 +414,7 @@ function scaffoldWorkspace(requestPath, options = {}) {
   return { normalized, workspaceDir, envTemplatePath, result };
 }
 
-function findLatestBroadcastArtifact(workspaceDir, normalized) {
+function findLatestBroadcastArtifact(workspaceDir, normalized, chainId = null) {
   const scriptDir =
     normalized.standard === "erc20" ? "DeployDefiCompatibleERC20.s.sol" : "DeployDefiCompatibleERC721.s.sol";
   const baseDir = path.join(workspaceDir, "broadcast", scriptDir);
@@ -290,12 +422,9 @@ function findLatestBroadcastArtifact(workspaceDir, normalized) {
     return null;
   }
 
-  const preferredChainDir =
-    normalized.chainId !== null && normalized.chainId !== undefined
-      ? path.join(baseDir, String(normalized.chainId), "run-latest.json")
-      : null;
-  if (preferredChainDir && fs.existsSync(preferredChainDir)) {
-    return preferredChainDir;
+  if (chainId !== null) {
+    const exactMatch = path.join(baseDir, String(chainId), "run-latest.json");
+    return fs.existsSync(exactMatch) ? exactMatch : null;
   }
 
   const candidates = [];
@@ -316,20 +445,34 @@ function findLatestBroadcastArtifact(workspaceDir, normalized) {
 function extractDeploymentFromArtifact(artifactPath) {
   const artifact = readJson(artifactPath);
   const transactions = Array.isArray(artifact.transactions) ? artifact.transactions : [];
+  const receipts = Array.isArray(artifact.receipts) ? artifact.receipts : [];
   const createTx = [...transactions].reverse().find((item) => item.transactionType === "CREATE");
+  const matchingReceipt =
+    createTx?.contractAddress !== undefined
+      ? [...receipts]
+          .reverse()
+          .find(
+            (item) =>
+              typeof item.contractAddress === "string" &&
+              item.contractAddress.toLowerCase() === createTx.contractAddress.toLowerCase(),
+          ) ?? null
+      : receipts.at(-1) ?? null;
 
   return {
     artifactPath,
     txHash: createTx?.hash ?? null,
     deployedAddress: createTx?.contractAddress ?? null,
+    deployer: createTx?.transaction?.from ?? matchingReceipt?.from ?? null,
+    chainId: parseChainId(artifact.chain ?? createTx?.transaction?.chainId ?? null, "artifact chainId"),
   };
 }
 
-function deployRequest(requestPath, options = {}) {
+async function deployRequest(requestPath, options = {}) {
   const { normalized, workspaceDir, envTemplatePath, result } = scaffoldWorkspace(requestPath, options);
   const { env, rpcUrl, requestedPrivateKey } = buildRuntimeEnv(normalized, options);
   const broadcast = Boolean(options.broadcast);
   const verify = Boolean(options.verify);
+  let actualChainId = null;
 
   if (broadcast && !rpcUrl) {
     throw new Error("broadcast requires --rpc-url or RPC_URL");
@@ -337,6 +480,11 @@ function deployRequest(requestPath, options = {}) {
   if (broadcast && !requestedPrivateKey) {
     throw new Error("broadcast requires --private-key or PRIVATE_KEY");
   }
+  if (broadcast) {
+    actualChainId = await fetchRpcChainId(rpcUrl);
+  }
+
+  const chainMetadata = resolveChainMetadata(normalized, { broadcast, actualChainId });
 
   runCommand("forge", ["build"], { cwd: workspaceDir, env });
   runCommand("forge", ["test"], { cwd: workspaceDir, env });
@@ -349,34 +497,41 @@ function deployRequest(requestPath, options = {}) {
     txHash: null,
     deployedAddress: null,
     artifactPath: null,
+    deployer: null,
+    chainId: chainMetadata.chainId,
   };
 
   if (broadcast) {
-    const artifactPath = findLatestBroadcastArtifact(workspaceDir, normalized);
+    const artifactPath = findLatestBroadcastArtifact(workspaceDir, normalized, actualChainId);
     if (artifactPath) {
       deployment = extractDeploymentFromArtifact(artifactPath);
     }
     if (!deployment.artifactPath || !deployment.txHash || !deployment.deployedAddress) {
       throw new Error("broadcast completed without a parseable deployment artifact");
     }
+    if (deployment.chainId === null) {
+      throw new Error("broadcast artifact did not include a chain id");
+    }
+    if (deployment.chainId !== actualChainId) {
+      throw new Error(`broadcast artifact chain ${deployment.chainId} does not match RPC chain ${actualChainId}`);
+    }
   }
 
-  const chainSlug = normalized.chainName ? slugify(normalized.chainName) : String(normalized.chainId ?? "unknown");
-  const manifestPath = path.join(workspaceDir, "deployments", chainSlug, `${slugify(normalized.name)}.json`);
+  const manifestPath = path.join(workspaceDir, "deployments", chainMetadata.chainSlug, `${slugify(normalized.name)}.json`);
 
   const manifest = {
     status: broadcast ? "deployed" : "simulated",
     standard: normalized.standard,
     name: normalized.name,
     symbol: normalized.symbol,
-    chainId: normalized.chainId ?? null,
-    chainName: normalized.chainName ?? null,
+    chainId: chainMetadata.chainId,
+    chainName: chainMetadata.chainName,
     workspaceDir,
     envTemplatePath,
     requestPath: result.requestPath,
     normalizedPath: result.normalizedPath,
     contractName: normalized.contractName,
-    deployer: broadcast ? null : "simulation",
+    deployer: broadcast ? deployment.deployer : "simulation",
     owner: normalized.owner,
     constructorArgs:
       normalized.standard === "erc20"
@@ -400,7 +555,7 @@ function deployRequest(requestPath, options = {}) {
       requested: verify,
       status: verify && broadcast ? "requested-via-forge" : "not-requested",
     },
-    warnings: normalized.warnings ?? [],
+    warnings: [...(normalized.warnings ?? []), ...chainMetadata.warnings],
     compatibility: normalized.compatibility,
     txHash: deployment.txHash,
     deployedAddress: deployment.deployedAddress,
@@ -425,7 +580,7 @@ function printError(error) {
   process.stderr.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-function main() {
+async function main() {
   try {
     const parsed = parseArgs(process.argv.slice(2));
 
@@ -454,7 +609,7 @@ function main() {
     }
 
     if (parsed.command === "deploy") {
-      const manifest = deployRequest(requestPath, parsed.options);
+      const manifest = await deployRequest(requestPath, parsed.options);
       printJson(manifest);
       return;
     }
@@ -467,7 +622,10 @@ function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
-  main();
+  main().catch((error) => {
+    printError(error);
+    process.exit(1);
+  });
 }
 
 export {
@@ -475,8 +633,12 @@ export {
   buildEnvTemplate,
   deployRequest,
   extractDeploymentFromArtifact,
+  fetchRpcChainId,
+  chainNamesMatch,
   normalizeRequest,
+  parseChainId,
   resolvePrivateKey,
+  resolveChainMetadata,
   resolveRpcUrl,
   shellQuote,
 };

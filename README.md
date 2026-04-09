@@ -17,6 +17,8 @@ to call one command with JSON in and JSON out, the CLI is the stable interface.
 - normalizes token deployment requests
 - rejects obviously incompatible token features like fee-on-transfer or
   soulbound behavior
+- blocks `permit: true` requests until a dedicated permit-capable ERC20 template
+  exists
 - scaffolds a self-contained Foundry workspace
 - runs `forge build` and `forge test`
 - simulates or broadcasts the deployment script
@@ -155,6 +157,10 @@ Runs the full flow:
   collateral use
 - dry-run is the default
 - real deployment requires `--broadcast`
+- broadcast fails closed if the request `chainId` or `chainName` does not match
+  the RPC chain
+- broadcast manifests use the actual broadcast chain instead of request-sourced
+  chain metadata
 
 ## Repo Layout
 

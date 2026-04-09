@@ -150,7 +150,9 @@ def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
     if minting_enabled:
         warnings.append("owner minting changes supply assumptions and must be disclosed")
     if permit:
-        warnings.append("permit requested: extend the template with ERC20Permit only if downstream UX needs it")
+        blocking_issues.append(
+            "permit=true is not supported by the bundled ERC20 template; add a dedicated ERC20Permit variant before deployment"
+        )
 
     status = "blocked" if blocking_issues else "compatible"
     notes = ["generic ERC20 path for Ajna and Uniswap"] if not blocking_issues else []

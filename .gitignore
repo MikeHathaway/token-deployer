@@ -17,3 +17,4 @@ deployments/
 
 # Node runtime artifacts
 node_modules/
+.context/

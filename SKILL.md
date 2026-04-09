@@ -35,6 +35,8 @@ If you need deeper context, read:
 - Prefer vanilla ERC20 behavior: no fee-on-transfer, no rebasing, no blacklist,
   no pause in the transfer path, no transfer tax, no auto-liquidity logic, and
   no hooks that surprise routers or lending pools.
+- The bundled CLI currently blocks `permit: true` requests until a dedicated
+  ERC20Permit variant exists.
 - Prefer transferable ERC721 behavior: no soulbound restrictions, no transfer
   blacklists, and no transfer-time hooks that can block pool liquidations or
   marketplace transfers.
