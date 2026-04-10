@@ -6,11 +6,14 @@ import path from "node:path";
 
 import {
   buildDeployCommand,
+  buildDeploymentManifest,
   buildEnvTemplate,
   chainNamesMatch,
+  deployRequest,
   extractDeploymentFromArtifact,
   extractMintResultFromReceipt,
   fetchRpcChainId,
+  loadBroadcastDeployment,
   normalizeRequest,
   parseUintString,
   resolveChainMetadata,
@@ -165,6 +168,103 @@ test("extractDeploymentFromArtifact returns deployer and chain metadata", () => 
   assert.equal(deployment.chainId, 31337);
 });
 
+test("loadBroadcastDeployment validates a recovered broadcast artifact", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-artifact-"));
+  const artifactPath = path.join(
+    tempDir,
+    "broadcast",
+    "DeployDefiCompatibleERC20.s.sol",
+    "31337",
+    "run-latest.json",
+  );
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(
+    artifactPath,
+    JSON.stringify(
+      {
+        chain: 31337,
+        transactions: [
+          {
+            hash: "0xabc",
+            transactionType: "CREATE",
+            contractAddress: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+            transaction: {
+              from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              chainId: "0x7a69",
+            },
+          },
+        ],
+        receipts: [
+          {
+            from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            contractAddress: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+
+  const deployment = loadBroadcastDeployment(tempDir, { standard: "erc20" }, 31337);
+  assert.equal(deployment.txHash, "0xabc");
+  assert.equal(deployment.deployedAddress, "0x5FbDB2315678afecb367f032d93F642f64180aa3");
+  assert.equal(deployment.deployer, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+  assert.equal(deployment.chainId, 31337);
+});
+
+test("buildDeploymentManifest can record verification failures after broadcast", () => {
+  const manifest = buildDeploymentManifest({
+    normalized: {
+      standard: "erc20",
+      name: "Verify Token",
+      symbol: "VERIFY",
+      contractName: "VerifyToken",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      features: { mintable: false },
+      compatibility: {
+        ajna: { status: "compatible", notes: [] },
+        uniswap: { status: "compatible", notes: [] },
+      },
+    },
+    workspaceDir: "/tmp/workspace",
+    envTemplatePath: "/tmp/workspace/.env.token-deployer",
+    result: {
+      requestPath: "/tmp/workspace/token-deployer.request.json",
+      normalizedPath: "/tmp/workspace/token-deployer.normalized.json",
+    },
+    chainMetadata: {
+      chainId: 31337,
+      chainName: "anvil",
+      chainSlug: "anvil",
+      warnings: [],
+    },
+    broadcast: true,
+    verify: true,
+    rpcUrl: "http://rpc.example",
+    deployment: {
+      txHash: "0xabc",
+      deployedAddress: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      artifactPath: "/tmp/workspace/broadcast/run-latest.json",
+      deployer: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      chainId: 31337,
+    },
+    warnings: ["broadcast succeeded but verification failed; manifest was preserved for recovery"],
+    verification: {
+      requested: true,
+      status: "failed-after-broadcast",
+      error: "verification failed",
+    },
+  });
+
+  assert.equal(manifest.status, "deployed");
+  assert.equal(manifest.verification.status, "failed-after-broadcast");
+  assert.match(manifest.verification.error, /verification failed/);
+});
+
 test("parseUintString accepts decimal and hex uints", () => {
   assert.equal(parseUintString("42", "amount"), "42");
   assert.equal(parseUintString("0x2a", "amount"), "42");
@@ -298,4 +398,252 @@ test("normalizeRequest blocks requests that omit both chainId and chainName", ()
   assert.equal(normalized.compatibility.ajna.status, "blocked");
   assert.equal(normalized.compatibility.uniswap.status, "blocked");
   assert.match(normalized.blockingIssues.join("\n"), /chainId or chainName is required/);
+});
+
+test("normalizeRequest blocks booleans in numeric fields", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Boolean Token",
+      symbol: "BOOL",
+      chainId: 31337,
+      chainName: "anvil",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: true,
+      decimals: false,
+      mintable: false,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(normalized.blockingIssues.join("\n"), /initialSupply must be a non-negative integer/);
+  assert.match(normalized.blockingIssues.join("\n"), /decimals must be an integer between 0 and 255/);
+});
+
+test("normalizeRequest blocks float-valued numeric fields", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Float Token",
+      symbol: "FLOAT",
+      chainId: 31337,
+      chainName: "anvil",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: 1000.9,
+      decimals: 18.1,
+      mintable: false,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.initialSupply, null);
+  assert.equal(normalized.decimals, 18);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(normalized.blockingIssues.join("\n"), /initialSupply must be a non-negative integer/);
+  assert.match(normalized.blockingIssues.join("\n"), /decimals must be an integer between 0 and 255/);
+});
+
+test("normalizeRequest blocks malformed chainId values before scaffold or deploy", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Bad Chain Id",
+      symbol: "BADCID",
+      chainId: true,
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      mintable: false,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.chainId, null);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(normalized.blockingIssues.join("\n"), /chainId must be a non-negative integer/);
+});
+
+test("normalizeRequest blocks malformed chainName values", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Bad Chain Name",
+      symbol: "BADCN",
+      chainId: 31337,
+      chainName: true,
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      mintable: false,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.chainName, null);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(normalized.blockingIssues.join("\n"), /chainName must be a non-empty string/);
+});
+
+test("normalizeRequest blocks malformed boolean feature flags", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-request-"));
+  const requestPath = path.join(tempDir, "request.json");
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Bad Bool Flags",
+      symbol: "BBF",
+      chainId: 31337,
+      chainName: "anvil",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      mintable: 2,
+      feeOnTransfer: 1,
+    }),
+  );
+
+  const normalized = normalizeRequest(requestPath);
+  assert.equal(normalized.features.mintable, false);
+  assert.equal(normalized.features.feeOnTransfer, false);
+  assert.equal(normalized.compatibility.ajna.status, "blocked");
+  assert.equal(normalized.compatibility.uniswap.status, "blocked");
+  assert.match(normalized.blockingIssues.join("\n"), /mintable must be a boolean/);
+  assert.match(normalized.blockingIssues.join("\n"), /feeOnTransfer must be a boolean/);
+});
+
+test("deployRequest preserves a manifest when verification fails after broadcast", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-deployer-forge-"));
+  const fakeBinDir = path.join(tempDir, "bin");
+  const fakeForgePath = path.join(fakeBinDir, "forge");
+  const requestPath = path.join(tempDir, "request.json");
+  const workspaceDir = path.join(tempDir, "workspace");
+
+  fs.mkdirSync(fakeBinDir, { recursive: true });
+  fs.writeFileSync(
+    fakeForgePath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+cmd="\${1:-}"
+shift || true
+case "$cmd" in
+  build|test)
+    exit 0
+    ;;
+  script)
+    mkdir -p "$PWD/broadcast/DeployDefiCompatibleERC20.s.sol/31337"
+    cat > "$PWD/broadcast/DeployDefiCompatibleERC20.s.sol/31337/run-latest.json" <<'EOF'
+{
+  "chain": 31337,
+  "transactions": [
+    {
+      "hash": "0xabc",
+      "transactionType": "CREATE",
+      "contractAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      "transaction": {
+        "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+        "chainId": "0x7a69"
+      }
+    }
+  ],
+  "receipts": [
+    {
+      "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+      "contractAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+    }
+  ]
+}
+EOF
+    printf 'verification failed\\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected forge command: %s\\n' "$cmd" >&2
+    exit 1
+    ;;
+esac
+`,
+  );
+  fs.chmodSync(fakeForgePath, 0o755);
+  fs.writeFileSync(
+    requestPath,
+    JSON.stringify({
+      standard: "erc20",
+      name: "Verify Token",
+      symbol: "VERIFY",
+      chainId: 31337,
+      chainName: "anvil",
+      owner: "0x1111111111111111111111111111111111111111",
+      initialRecipient: "0x2222222222222222222222222222222222222222",
+      initialSupply: "1000",
+      decimals: 18,
+      mintable: false,
+    }),
+  );
+
+  const previousPath = process.env.PATH;
+  const previousFetch = globalThis.fetch;
+  process.env.PATH = `${fakeBinDir}:${previousPath ?? ""}`;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return { jsonrpc: "2.0", id: 1, result: "0x7a69" };
+    },
+  });
+
+  try {
+    await assert.rejects(
+      () =>
+        deployRequest(requestPath, {
+          "target-dir": workspaceDir,
+          force: true,
+          broadcast: true,
+          verify: true,
+          "rpc-url": "http://rpc.example",
+          "private-key": "0x1234",
+        }),
+      (error) => {
+        assert.match(error.message, /manifest preserved/);
+        assert.equal(error.details.verification.status, "failed-after-broadcast");
+        return true;
+      },
+    );
+
+    const manifestPath = path.join(workspaceDir, "deployments", "anvil", "verify-token.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    assert.equal(manifest.status, "deployed");
+    assert.equal(manifest.deployedAddress, "0x5FbDB2315678afecb367f032d93F642f64180aa3");
+    assert.equal(manifest.verification.status, "failed-after-broadcast");
+    assert.match(manifest.verification.error, /verification failed/);
+    assert.match(
+      manifest.warnings.join("\n"),
+      /broadcast succeeded but verification failed; manifest was preserved for recovery/,
+    );
+  } finally {
+    process.env.PATH = previousPath;
+    globalThis.fetch = previousFetch;
+  }
 });

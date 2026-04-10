@@ -17,7 +17,10 @@ to call one command with JSON in and JSON out, the CLI is the stable interface.
 - normalizes token deployment requests
 - rejects obviously incompatible token features like fee-on-transfer or
   soulbound behavior
-- blocks requests that omit both `chainId` and `chainName`
+- blocks missing or malformed chain selectors like `chainId` and `chainName`
+- blocks malformed numeric request fields like booleans or floats in
+  `initialSupply` and `decimals`
+- blocks malformed boolean feature flags like `mintable` and `feeOnTransfer`
 - blocks `permit: true` requests until a dedicated permit-capable ERC20 template
   exists
 - scaffolds a self-contained Foundry workspace
@@ -139,6 +142,9 @@ Dry-run deployments write a manifest with `status: "simulated"`.
 Broadcast deployments write a manifest with `status: "deployed"`.
 Mint commands return JSON to stdout and reuse the deployment manifest as the
 input state.
+If a broadcast succeeds but verification later fails, the CLI still writes the
+manifest and records `verification.status: "failed-after-broadcast"` before
+exiting non-zero.
 
 ## Commands
 
@@ -174,6 +180,10 @@ Runs the full flow:
 5. run the matching deploy script
 6. write a deployment manifest
 
+If verification fails after a successful broadcast, the deploy command still
+preserves the manifest for recovery and exits non-zero with the manifest path in
+the error details.
+
 ### `mint`
 
 ```bash
@@ -206,6 +216,8 @@ Rules:
 - real deployment requires `--broadcast`
 - broadcast fails closed if the request `chainId` or `chainName` does not match
   the RPC chain
+- broadcast manifest persistence is fail-closed against verification outages:
+  a post-broadcast verification failure still preserves the deployment manifest
 - mint broadcast fails closed if the signer is not the current onchain owner
 - if the RPC chain id is not in the bundled canonical chain map, broadcasts must
   rely on `chainId`; request-sourced `chainName` is rejected instead of being

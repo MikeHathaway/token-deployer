@@ -741,59 +741,46 @@ function extractDeploymentFromArtifact(artifactPath) {
   };
 }
 
-async function deployRequest(requestPath, options = {}) {
-  const { normalized, workspaceDir, envTemplatePath, result } = scaffoldWorkspace(requestPath, options);
-  const { env, rpcUrl, requestedPrivateKey } = buildRuntimeEnv(normalized, options);
-  const broadcast = Boolean(options.broadcast);
-  const verify = Boolean(options.verify);
-  let actualChainId = null;
-
-  if (broadcast && !rpcUrl) {
-    throw new Error("broadcast requires --rpc-url or RPC_URL");
-  }
-  if (broadcast && !requestedPrivateKey) {
-    throw new Error("broadcast requires --private-key or PRIVATE_KEY");
-  }
-  if (broadcast) {
-    actualChainId = await fetchRpcChainId(rpcUrl);
-  }
-
-  const chainMetadata = resolveChainMetadata(normalized, { broadcast, actualChainId });
-
-  runCommand("forge", ["build"], { cwd: workspaceDir, env });
-  runCommand("forge", ["test"], { cwd: workspaceDir, env });
-  runCommand("forge", buildDeployCommand(normalized, { rpcUrl, broadcast, verify }), {
-    cwd: workspaceDir,
-    env,
-  });
-
+function loadBroadcastDeployment(workspaceDir, normalized, actualChainId) {
   let deployment = {
     txHash: null,
     deployedAddress: null,
     artifactPath: null,
     deployer: null,
-    chainId: chainMetadata.chainId,
+    chainId: actualChainId,
   };
 
-  if (broadcast) {
-    const artifactPath = findLatestBroadcastArtifact(workspaceDir, normalized, actualChainId);
-    if (artifactPath) {
-      deployment = extractDeploymentFromArtifact(artifactPath);
-    }
-    if (!deployment.artifactPath || !deployment.txHash || !deployment.deployedAddress) {
-      throw new Error("broadcast completed without a parseable deployment artifact");
-    }
-    if (deployment.chainId === null) {
-      throw new Error("broadcast artifact did not include a chain id");
-    }
-    if (deployment.chainId !== actualChainId) {
-      throw new Error(`broadcast artifact chain ${deployment.chainId} does not match RPC chain ${actualChainId}`);
-    }
+  const artifactPath = findLatestBroadcastArtifact(workspaceDir, normalized, actualChainId);
+  if (artifactPath) {
+    deployment = extractDeploymentFromArtifact(artifactPath);
+  }
+  if (!deployment.artifactPath || !deployment.txHash || !deployment.deployedAddress) {
+    throw new Error("broadcast completed without a parseable deployment artifact");
+  }
+  if (deployment.chainId === null) {
+    throw new Error("broadcast artifact did not include a chain id");
+  }
+  if (deployment.chainId !== actualChainId) {
+    throw new Error(`broadcast artifact chain ${deployment.chainId} does not match RPC chain ${actualChainId}`);
   }
 
-  const manifestPath = path.join(workspaceDir, "deployments", chainMetadata.chainSlug, `${slugify(normalized.name)}.json`);
+  return deployment;
+}
 
-  const manifest = {
+function buildDeploymentManifest({
+  normalized,
+  workspaceDir,
+  envTemplatePath,
+  result,
+  chainMetadata,
+  broadcast,
+  verify,
+  rpcUrl,
+  deployment,
+  warnings,
+  verification,
+}) {
+  return {
     status: broadcast ? "deployed" : "simulated",
     standard: normalized.standard,
     name: normalized.name,
@@ -825,19 +812,119 @@ async function deployRequest(requestPath, options = {}) {
             baseURI: normalized.baseURI ?? "",
           },
     deployCommand: ["forge", ...buildDeployCommand(normalized, { rpcUrl, broadcast, verify })],
-    verification: {
-      requested: verify,
-      status: verify && broadcast ? "requested-via-forge" : "not-requested",
-    },
-    warnings: [...(normalized.warnings ?? []), ...chainMetadata.warnings],
+    verification,
+    warnings,
     compatibility: normalized.compatibility,
     txHash: deployment.txHash,
     deployedAddress: deployment.deployedAddress,
     artifactPath: deployment.artifactPath,
   };
+}
+
+async function deployRequest(requestPath, options = {}) {
+  const { normalized, workspaceDir, envTemplatePath, result } = scaffoldWorkspace(requestPath, options);
+  const { env, rpcUrl, requestedPrivateKey } = buildRuntimeEnv(normalized, options);
+  const broadcast = Boolean(options.broadcast);
+  const verify = Boolean(options.verify);
+  let actualChainId = null;
+
+  if (broadcast && !rpcUrl) {
+    throw new Error("broadcast requires --rpc-url or RPC_URL");
+  }
+  if (broadcast && !requestedPrivateKey) {
+    throw new Error("broadcast requires --private-key or PRIVATE_KEY");
+  }
+  if (broadcast) {
+    actualChainId = await fetchRpcChainId(rpcUrl);
+  }
+
+  const chainMetadata = resolveChainMetadata(normalized, { broadcast, actualChainId });
+  const warnings = [...(normalized.warnings ?? []), ...chainMetadata.warnings];
+
+  runCommand("forge", ["build"], { cwd: workspaceDir, env });
+  runCommand("forge", ["test"], { cwd: workspaceDir, env });
+  let forgeScriptError = null;
+  try {
+    runCommand("forge", buildDeployCommand(normalized, { rpcUrl, broadcast, verify }), {
+      cwd: workspaceDir,
+      env,
+    });
+  } catch (error) {
+    forgeScriptError = error;
+  }
+
+  let deployment = {
+    txHash: null,
+    deployedAddress: null,
+    artifactPath: null,
+    deployer: null,
+    chainId: chainMetadata.chainId,
+  };
+  let verification = {
+    requested: verify,
+    status: verify && broadcast ? "requested-via-forge" : "not-requested",
+  };
+
+  if (broadcast) {
+    try {
+      deployment = loadBroadcastDeployment(workspaceDir, normalized, actualChainId);
+    } catch (artifactError) {
+      if (forgeScriptError) {
+        throw forgeScriptError;
+      }
+      throw artifactError;
+    }
+
+    if (forgeScriptError) {
+      verification = {
+        requested: verify,
+        status: verify ? "failed-after-broadcast" : "error-after-broadcast",
+        error: forgeScriptError.message,
+      };
+      warnings.push(
+        verify
+          ? "broadcast succeeded but verification failed; manifest was preserved for recovery"
+          : "broadcast succeeded but forge returned a post-broadcast error; manifest was preserved for recovery",
+      );
+    }
+  } else if (forgeScriptError) {
+    throw forgeScriptError;
+  }
+
+  const manifestPath = path.join(workspaceDir, "deployments", chainMetadata.chainSlug, `${slugify(normalized.name)}.json`);
+  const manifest = buildDeploymentManifest({
+    normalized,
+    workspaceDir,
+    envTemplatePath,
+    result,
+    chainMetadata,
+    broadcast,
+    verify,
+    rpcUrl,
+    deployment,
+    warnings,
+    verification,
+  });
 
   writeJson(manifestPath, manifest);
   manifest.manifestPath = manifestPath;
+
+  if (forgeScriptError) {
+    const recoveredError = new Error(
+      verify
+        ? `broadcast succeeded but verification failed; manifest preserved at ${manifestPath}`
+        : `broadcast succeeded but forge returned a post-broadcast error; manifest preserved at ${manifestPath}`,
+    );
+    recoveredError.details = {
+      manifestPath,
+      deployedAddress: manifest.deployedAddress,
+      txHash: manifest.txHash,
+      verification: manifest.verification,
+      originalError: forgeScriptError.message,
+    };
+    throw recoveredError;
+  }
+
   return manifest;
 }
 
@@ -910,11 +997,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
 
 export {
   buildDeployCommand,
+  buildDeploymentManifest,
   buildEnvTemplate,
   deployRequest,
   extractDeploymentFromArtifact,
   extractMintResultFromReceipt,
   fetchRpcChainId,
+  loadBroadcastDeployment,
   chainNamesMatch,
   mintFromManifest,
   normalizeRequest,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+JS_MAX_SAFE_INTEGER = 9007199254740991
 
 
 def load_input(input_path: str) -> dict[str, Any]:
@@ -27,8 +28,13 @@ def load_input(input_path: str) -> dict[str, Any]:
     return data
 
 
-def read_bool(data: dict[str, Any], key: str, default: bool = False) -> bool:
-    value = data.get(key, default)
+def read_bool(
+    data: dict[str, Any], key: str, blocking_issues: list[str], default: bool = False
+) -> bool:
+    if key not in data:
+        return default
+
+    value = data.get(key)
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -37,8 +43,7 @@ def read_bool(data: dict[str, Any], key: str, default: bool = False) -> bool:
             return True
         if normalized in {"0", "false", "no", "n"}:
             return False
-    if isinstance(value, (int, float)):
-        return bool(value)
+    blocking_issues.append(f"{key} must be a boolean")
     return default
 
 
@@ -70,6 +75,12 @@ def normalize_standard(raw: Any, blocking_issues: list[str]) -> str:
 def normalize_decimals(raw: Any, warnings: list[str], blocking_issues: list[str]) -> int:
     if raw is None:
         return 18
+    if isinstance(raw, bool):
+        blocking_issues.append("decimals must be an integer between 0 and 255")
+        return 18
+    if isinstance(raw, float):
+        blocking_issues.append("decimals must be an integer between 0 and 255")
+        return 18
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -90,6 +101,12 @@ def normalize_uint_string(
         if required:
             blocking_issues.append(f"{field_name} is required")
         return None
+    if isinstance(raw, bool):
+        blocking_issues.append(f"{field_name} must be a non-negative integer")
+        return None
+    if isinstance(raw, float):
+        blocking_issues.append(f"{field_name} must be a non-negative integer")
+        return None
 
     try:
         value = int(raw)
@@ -104,11 +121,59 @@ def normalize_uint_string(
     return str(value)
 
 
-def normalize_optional_string(raw: Any) -> Any:
+def normalize_chain_id(raw: Any, blocking_issues: list[str]) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        blocking_issues.append("chainId must be a non-negative integer")
+        return None
+
+    value: int
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float):
+        if not raw.is_integer():
+            blocking_issues.append("chainId must be a non-negative integer")
+            return None
+        value = int(raw)
+    elif isinstance(raw, str):
+        trimmed = raw.strip()
+        if not trimmed:
+            return None
+        if re.fullmatch(r"0x[0-9a-fA-F]+", trimmed):
+            value = int(trimmed, 16)
+        elif re.fullmatch(r"\d+", trimmed):
+            value = int(trimmed, 10)
+        else:
+            blocking_issues.append("chainId must be a non-negative integer")
+            return None
+    else:
+        blocking_issues.append("chainId must be a non-negative integer")
+        return None
+
+    if value < 0 or value > JS_MAX_SAFE_INTEGER:
+        blocking_issues.append("chainId must be a non-negative integer")
+        return None
+
+    return value
+
+
+def normalize_optional_string(raw: Any, field_name: str, blocking_issues: list[str]) -> str | None:
+    if raw is None:
+        return None
     if isinstance(raw, str):
         trimmed = raw.strip()
         return trimmed if trimmed else None
-    return raw
+    blocking_issues.append(f"{field_name} must be a non-empty string")
+    return None
+
+
+def has_meaningful_input(raw: Any) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    return True
 
 
 def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
@@ -134,16 +199,16 @@ def build_erc20_result(data: dict[str, Any]) -> dict[str, Any]:
     )
 
     decimals = normalize_decimals(data.get("decimals"), warnings, blocking_issues)
-    minting_enabled = read_bool(data, "mintable")
-    permit = read_bool(data, "permit")
+    minting_enabled = read_bool(data, "mintable", blocking_issues)
+    permit = read_bool(data, "permit", blocking_issues)
 
     flags = {
-        "feeOnTransfer": read_bool(data, "feeOnTransfer"),
-        "rebasing": read_bool(data, "rebasing"),
-        "blacklist": read_bool(data, "blacklist"),
-        "pausable": read_bool(data, "pausable"),
-        "transferHooks": read_bool(data, "transferHooks"),
-        "upgradeable": read_bool(data, "upgradeable"),
+        "feeOnTransfer": read_bool(data, "feeOnTransfer", blocking_issues),
+        "rebasing": read_bool(data, "rebasing", blocking_issues),
+        "blacklist": read_bool(data, "blacklist", blocking_issues),
+        "pausable": read_bool(data, "pausable", blocking_issues),
+        "transferHooks": read_bool(data, "transferHooks", blocking_issues),
+        "upgradeable": read_bool(data, "upgradeable", blocking_issues),
     }
 
     for flag_name in ("feeOnTransfer", "rebasing", "blacklist", "pausable", "transferHooks"):
@@ -232,10 +297,10 @@ def build_erc721_result(data: dict[str, Any]) -> dict[str, Any]:
         base_uri = ""
 
     flags = {
-        "soulbound": read_bool(data, "soulbound"),
-        "blacklist": read_bool(data, "blacklist"),
-        "transferHooks": read_bool(data, "transferHooks"),
-        "upgradeable": read_bool(data, "upgradeable"),
+        "soulbound": read_bool(data, "soulbound", blocking_issues),
+        "blacklist": read_bool(data, "blacklist", blocking_issues),
+        "transferHooks": read_bool(data, "transferHooks", blocking_issues),
+        "upgradeable": read_bool(data, "upgradeable", blocking_issues),
     }
 
     for flag_name in ("soulbound", "blacklist", "transferHooks"):
@@ -310,10 +375,16 @@ def main() -> int:
     else:
         result = build_erc721_result(data)
 
-    chain_id = normalize_optional_string(data.get("chainId"))
-    chain_name = normalize_optional_string(data.get("chainName"))
-    has_chain_name = isinstance(chain_name, str)
-    if chain_id is None and not has_chain_name:
+    raw_chain_id = data.get("chainId")
+    raw_chain_name = data.get("chainName")
+    chain_id = normalize_chain_id(raw_chain_id, blocking_issues)
+    chain_name = normalize_optional_string(raw_chain_name, "chainName", blocking_issues)
+    if (
+        chain_id is None
+        and chain_name is None
+        and not has_meaningful_input(raw_chain_id)
+        and not has_meaningful_input(raw_chain_name)
+    ):
         blocking_issues.append("chainId or chainName is required")
 
     result["chainId"] = chain_id

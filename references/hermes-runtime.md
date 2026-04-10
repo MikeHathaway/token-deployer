@@ -78,6 +78,9 @@ Return JSON with at least these keys:
   `references/compatibility-checklist.md`.
 - Stop if `forge build` or `forge test` fails.
 - Stop if explorer verification fails and the operator asked for verified source.
+- If broadcast succeeds before verification fails, preserve the manifest anyway
+  and report the deployment as live with `verification.status:
+  "failed-after-broadcast"`.
 - Stop if the requested `chainId` or `chainName` disagrees with the selected RPC.
 - Stop if the operator supplies `chainName` for a broadcast chain whose canonical
   name is unknown to the tool; use `chainId` only or extend the chain map first.

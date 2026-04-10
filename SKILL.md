@@ -96,6 +96,9 @@ remember that the signer must be the current onchain owner.
 Return a deployment summary that includes token standard, chain id, deployer,
 deployed address, tx hash, constructor args, verification status, manifest
 path, and any compatibility warnings that remain.
+If verification fails after a successful broadcast, preserve the manifest and
+surface the verification failure separately instead of discarding the deployment
+record.
 
 ## Foundry-first path
 
