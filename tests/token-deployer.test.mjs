@@ -9,8 +9,10 @@ import {
   buildEnvTemplate,
   chainNamesMatch,
   extractDeploymentFromArtifact,
+  extractMintResultFromReceipt,
   fetchRpcChainId,
   normalizeRequest,
+  parseUintString,
   resolveChainMetadata,
 } from "../scripts/token-deployer.mjs";
 
@@ -161,6 +163,88 @@ test("extractDeploymentFromArtifact returns deployer and chain metadata", () => 
   assert.equal(deployment.deployedAddress, "0x5FbDB2315678afecb367f032d93F642f64180aa3");
   assert.equal(deployment.deployer, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
   assert.equal(deployment.chainId, 31337);
+});
+
+test("parseUintString accepts decimal and hex uints", () => {
+  assert.equal(parseUintString("42", "amount"), "42");
+  assert.equal(parseUintString("0x2a", "amount"), "42");
+  assert.equal(parseUintString(42, "amount"), "42");
+});
+
+test("extractMintResultFromReceipt parses erc20 mint amount", () => {
+  const receipt = {
+    logs: [
+      {
+        address: "0x5555555555555555555555555555555555555555",
+        topics: [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x0000000000000000000000002222222222222222222222222222222222222222",
+        ],
+        data: "0x00000000000000000000000000000000000000000000000000000000000003e8",
+      },
+    ],
+  };
+
+  const result = extractMintResultFromReceipt(receipt, {
+    standard: "erc20",
+    contractAddress: "0x5555555555555555555555555555555555555555",
+    recipient: "0x2222222222222222222222222222222222222222",
+  });
+
+  assert.deepEqual(result, { amount: "1000" });
+});
+
+test("extractMintResultFromReceipt parses erc721 token ids", () => {
+  const receipt = {
+    logs: [
+      {
+        address: "0x5555555555555555555555555555555555555555",
+        topics: [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0x0000000000000000000000002222222222222222222222222222222222222222",
+          "0x0000000000000000000000000000000000000000000000000000000000000007",
+        ],
+        data: "0x",
+      },
+    ],
+  };
+
+  const result = extractMintResultFromReceipt(receipt, {
+    standard: "erc721",
+    contractAddress: "0x5555555555555555555555555555555555555555",
+    recipient: "0x2222222222222222222222222222222222222222",
+  });
+
+  assert.deepEqual(result, { tokenId: "7" });
+});
+
+test("extractMintResultFromReceipt rejects receipts without a matching mint log", () => {
+  assert.throws(
+    () =>
+      extractMintResultFromReceipt(
+        {
+          logs: [
+            {
+              address: "0x5555555555555555555555555555555555555555",
+              topics: [
+                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "0x0000000000000000000000003333333333333333333333333333333333333333",
+              ],
+              data: "0x01",
+            },
+          ],
+        },
+        {
+          standard: "erc20",
+          contractAddress: "0x5555555555555555555555555555555555555555",
+          recipient: "0x2222222222222222222222222222222222222222",
+        },
+      ),
+    /did not include a matching Transfer event/,
+  );
 });
 
 test("normalizeRequest blocks permit until a permit-capable template exists", () => {

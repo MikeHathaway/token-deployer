@@ -11,6 +11,8 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const NORMALIZER_PATH = path.join(ROOT_DIR, "scripts", "normalize_token_config.py");
 const TEMPLATE_DIR = path.join(ROOT_DIR, "assets", "foundry-template");
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const KNOWN_CHAIN_NAMES = new Map([
   [1, "ethereum"],
   [10, "optimism"],
@@ -26,10 +28,13 @@ function usage() {
   token-deployer normalize <request.json> [--out <path>]
   token-deployer scaffold <request.json> [--target-dir <dir>] [--force]
   token-deployer deploy <request.json> [--target-dir <dir>] [--force] [--broadcast] [--verify] [--rpc-url <url>] [--private-key <hex>]
+  token-deployer mint <deployment.json> --to <address> [--amount <uint>] [--broadcast] [--rpc-url <url>] [--private-key <hex>]
 
 Notes:
   - deploy without --broadcast performs scaffold + forge build + forge test + forge script simulation
   - deploy with --broadcast also submits the transaction and writes a deployment manifest
+  - mint without --broadcast simulates the mint call from the current onchain owner
+  - mint with --broadcast submits the mint transaction and returns a mint receipt summary
   - request.json should match the fields described in SKILL.md and references/hermes-runtime.md
 `;
 }
@@ -67,7 +72,7 @@ function parseArgs(argv) {
   return { command, positional, options };
 }
 
-function runCommand(command, args, { cwd = ROOT_DIR, env = process.env } = {}) {
+function runCommand(command, args, { cwd = ROOT_DIR, env = process.env, redactValues = [] } = {}) {
   const result = spawnSync(command, args, {
     cwd,
     env,
@@ -79,8 +84,10 @@ function runCommand(command, args, { cwd = ROOT_DIR, env = process.env } = {}) {
   }
 
   if (result.status !== 0) {
+    const redactionSet = new Set(redactValues.filter((value) => value));
+    const displayArgs = args.map((arg) => (redactionSet.has(arg) ? "<redacted>" : arg));
     const message = [
-      `${command} ${args.join(" ")} failed with exit code ${result.status}`,
+      `${command} ${displayArgs.join(" ")} failed with exit code ${result.status}`,
       result.stdout?.trim(),
       result.stderr?.trim(),
     ]
@@ -124,6 +131,22 @@ function shellQuote(value) {
   return `'${stringValue.replace(/'/g, `'\"'\"'`)}'`;
 }
 
+function normalizeAddress(value, fieldName = "address") {
+  if (typeof value !== "string") {
+    throw new Error(`${fieldName} must be a 20-byte EVM address`);
+  }
+
+  const trimmed = value.trim();
+  if (!ADDRESS_RE.test(trimmed)) {
+    throw new Error(`${fieldName} must be a 20-byte EVM address`);
+  }
+  return trimmed;
+}
+
+function addressesEqual(left, right) {
+  return normalizeAddress(left).toLowerCase() === normalizeAddress(right).toLowerCase();
+}
+
 function normalizeChainName(value) {
   if (typeof value !== "string") {
     return null;
@@ -160,6 +183,31 @@ function parseChainId(value, fieldName = "chainId") {
 
     if (Number.isSafeInteger(parsed) && parsed >= 0) {
       return parsed;
+    }
+  }
+
+  throw new Error(`${fieldName} must be a non-negative integer`);
+}
+
+function parseUintString(value, fieldName) {
+  if (value === undefined || value === null || value === "") {
+    throw new Error(`${fieldName} is required`);
+  }
+
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && value >= 0) {
+      return BigInt(value).toString();
+    }
+    throw new Error(`${fieldName} must be a non-negative integer`);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new Error(`${fieldName} is required`);
+    }
+    if (/^\d+$/.test(trimmed) || /^0x[0-9a-fA-F]+$/.test(trimmed)) {
+      return BigInt(trimmed).toString();
     }
   }
 
@@ -267,6 +315,26 @@ function normalizeRequest(requestPath, outPath) {
 
   const stdout = runCommand(python, args);
   return JSON.parse(stdout);
+}
+
+function readManifest(manifestPath) {
+  const resolvedPath = path.resolve(manifestPath);
+  const manifest = readJson(resolvedPath);
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("deployment manifest must be a JSON object");
+  }
+  if (manifest.standard !== "erc20" && manifest.standard !== "erc721") {
+    throw new Error("deployment manifest standard must be erc20 or erc721");
+  }
+  if (!manifest.deployedAddress) {
+    throw new Error("deployment manifest must include a deployedAddress from a broadcast deployment");
+  }
+
+  return {
+    manifest,
+    manifestPath: resolvedPath,
+    contractAddress: normalizeAddress(manifest.deployedAddress, "deployedAddress"),
+  };
 }
 
 function resolveRpcUrl(options = {}) {
@@ -377,6 +445,203 @@ function buildDeployCommand(normalized, { rpcUrl = null, broadcast = false, veri
     args.push("--verify");
   }
   return args;
+}
+
+function runCastCall(contractAddress, signature, args, { rpcUrl, from = null } = {}) {
+  const commandArgs = ["call", "--rpc-url", rpcUrl];
+  if (from) {
+    commandArgs.push("--from", from);
+  }
+  commandArgs.push(contractAddress, signature, ...args);
+  return runCommand("cast", commandArgs).trim();
+}
+
+function getOnchainOwner(contractAddress, rpcUrl) {
+  return normalizeAddress(runCastCall(contractAddress, "owner()(address)", [], { rpcUrl }), "owner()");
+}
+
+function getWalletAddress(privateKey) {
+  return normalizeAddress(
+    runCommand("cast", ["wallet", "address", privateKey], { redactValues: [privateKey] }).trim(),
+    "wallet address",
+  );
+}
+
+function decodeTopicAddress(topic, fieldName) {
+  if (typeof topic !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(topic)) {
+    throw new Error(`${fieldName} topic must be a 32-byte hex value`);
+  }
+  return normalizeAddress(`0x${topic.slice(-40)}`, fieldName);
+}
+
+function extractMintResultFromReceipt(receipt, { standard, contractAddress, recipient }) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
+    throw new Error("mint receipt must be a JSON object");
+  }
+
+  const logs = Array.isArray(receipt.logs) ? receipt.logs : [];
+  const mintLog = logs.find((log) => {
+    if (!log || typeof log !== "object") {
+      return false;
+    }
+    if (typeof log.address !== "string" || log.address.toLowerCase() !== contractAddress.toLowerCase()) {
+      return false;
+    }
+    if (!Array.isArray(log.topics) || log.topics[0]?.toLowerCase() !== TRANSFER_EVENT_TOPIC) {
+      return false;
+    }
+    if (log.topics[1] !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+      return false;
+    }
+    if (decodeTopicAddress(log.topics[2], "mint recipient").toLowerCase() !== recipient.toLowerCase()) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!mintLog) {
+    throw new Error("mint transaction receipt did not include a matching Transfer event");
+  }
+
+  if (standard === "erc721") {
+    if (typeof mintLog.topics[3] !== "string") {
+      throw new Error("erc721 mint receipt did not include a tokenId topic");
+    }
+    return {
+      tokenId: parseUintString(mintLog.topics[3], "minted tokenId"),
+    };
+  }
+
+  return {
+    amount: parseUintString(mintLog.data, "minted amount"),
+  };
+}
+
+async function mintFromManifest(manifestPath, options = {}) {
+  const { manifest, manifestPath: resolvedManifestPath, contractAddress } = readManifest(manifestPath);
+  const recipient = normalizeAddress(options.to, "mint recipient");
+  const rpcUrl = resolveRpcUrl(options);
+  const privateKey = resolvePrivateKey(options);
+  const broadcast = Boolean(options.broadcast);
+
+  if (!rpcUrl) {
+    throw new Error("mint requires --rpc-url or RPC_URL");
+  }
+
+  const actualChainId = await fetchRpcChainId(rpcUrl);
+  const chainMetadata = resolveChainMetadata(
+    { chainId: manifest.chainId, chainName: manifest.chainName },
+    { broadcast: true, actualChainId },
+  );
+
+  const onchainOwner = getOnchainOwner(contractAddress, rpcUrl);
+  const warnings = [];
+  if (manifest.owner && !addressesEqual(manifest.owner, onchainOwner)) {
+    warnings.push(
+      `manifest owner ${manifest.owner} differs from current onchain owner ${onchainOwner}; using current owner for validation`,
+    );
+  }
+  if (onchainOwner === "0x0000000000000000000000000000000000000000") {
+    throw new Error("contract owner is the zero address; owner-only minting is unavailable");
+  }
+
+  let signature;
+  let callArgs;
+  let amount = null;
+  let tokenId = null;
+
+  if (manifest.standard === "erc20") {
+    amount = parseUintString(options.amount, "mint amount");
+    const mintingEnabled = runCastCall(contractAddress, "mintingEnabled()(bool)", [], { rpcUrl });
+    if (mintingEnabled !== "true") {
+      throw new Error("erc20 minting is disabled for this deployment");
+    }
+    signature = "mint(address,uint256)";
+    callArgs = [recipient, amount];
+  } else {
+    if (options.amount !== undefined) {
+      throw new Error("erc721 mint does not accept --amount");
+    }
+    signature = "mint(address)";
+    callArgs = [recipient];
+    tokenId = (BigInt(runCastCall(contractAddress, "nextTokenId()(uint256)", [], { rpcUrl })) + 1n).toString();
+  }
+
+  if (!broadcast) {
+    runCastCall(contractAddress, signature, callArgs, { rpcUrl, from: onchainOwner });
+    return {
+      status: "simulated",
+      standard: manifest.standard,
+      contractAddress,
+      chainId: chainMetadata.chainId,
+      chainName: chainMetadata.chainName,
+      manifestPath: resolvedManifestPath,
+      owner: onchainOwner,
+      recipient,
+      amount,
+      tokenId,
+      warnings,
+    };
+  }
+
+  if (!privateKey) {
+    throw new Error("mint with --broadcast requires --private-key or PRIVATE_KEY");
+  }
+
+  const signerAddress = getWalletAddress(privateKey);
+  if (!addressesEqual(signerAddress, onchainOwner)) {
+    throw new Error(`mint signer ${signerAddress} does not match current owner ${onchainOwner}`);
+  }
+
+  const txHash = runCommand(
+    "cast",
+    ["send", "--async", "--rpc-url", rpcUrl, "--private-key", privateKey, contractAddress, signature, ...callArgs],
+    { redactValues: [privateKey] },
+  ).trim();
+
+  const receipt = JSON.parse(runCommand("cast", ["receipt", "--json", "--rpc-url", rpcUrl, txHash]));
+  const mintResult = extractMintResultFromReceipt(receipt, {
+    standard: manifest.standard,
+    contractAddress,
+    recipient,
+  });
+
+  if (manifest.standard === "erc721") {
+    tokenId = mintResult.tokenId;
+  } else {
+    amount = mintResult.amount;
+  }
+
+  const result = {
+    status: "minted",
+    standard: manifest.standard,
+    contractAddress,
+    chainId: chainMetadata.chainId,
+    chainName: chainMetadata.chainName,
+    manifestPath: resolvedManifestPath,
+    owner: onchainOwner,
+    recipient,
+    amount,
+    tokenId,
+    txHash,
+    blockNumber: parseUintString(receipt.blockNumber, "receipt blockNumber"),
+    warnings,
+  };
+
+  if (manifest.standard === "erc20") {
+    result.totalSupply = parseUintString(runCastCall(contractAddress, "totalSupply()(uint256)", [], { rpcUrl }), "totalSupply");
+    result.recipientBalance = parseUintString(
+      runCastCall(contractAddress, "balanceOf(address)(uint256)", [recipient], { rpcUrl }),
+      "recipient balance",
+    );
+  } else {
+    result.tokenOwner = normalizeAddress(
+      runCastCall(contractAddress, "ownerOf(uint256)(address)", [tokenId], { rpcUrl }),
+      "ownerOf(tokenId)",
+    );
+  }
+
+  return result;
 }
 
 function scaffoldWorkspace(requestPath, options = {}) {
@@ -598,13 +863,13 @@ async function main() {
       return;
     }
 
-    const requestPath = parsed.positional[0];
-    if (!requestPath) {
-      throw new Error("request.json path is required");
+    const inputPath = parsed.positional[0];
+    if (!inputPath) {
+      throw new Error("input path is required");
     }
 
     if (parsed.command === "normalize") {
-      const normalized = normalizeRequest(requestPath, parsed.options.out);
+      const normalized = normalizeRequest(inputPath, parsed.options.out);
       if (!parsed.options.out) {
         printJson(normalized);
       }
@@ -612,14 +877,20 @@ async function main() {
     }
 
     if (parsed.command === "scaffold") {
-      const result = scaffoldWorkspace(requestPath, parsed.options).result;
+      const result = scaffoldWorkspace(inputPath, parsed.options).result;
       printJson(result);
       return;
     }
 
     if (parsed.command === "deploy") {
-      const manifest = await deployRequest(requestPath, parsed.options);
+      const manifest = await deployRequest(inputPath, parsed.options);
       printJson(manifest);
+      return;
+    }
+
+    if (parsed.command === "mint") {
+      const result = await mintFromManifest(inputPath, parsed.options);
+      printJson(result);
       return;
     }
 
@@ -642,9 +913,12 @@ export {
   buildEnvTemplate,
   deployRequest,
   extractDeploymentFromArtifact,
+  extractMintResultFromReceipt,
   fetchRpcChainId,
   chainNamesMatch,
+  mintFromManifest,
   normalizeRequest,
+  parseUintString,
   parseChainId,
   resolvePrivateKey,
   resolveChainMetadata,

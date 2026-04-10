@@ -15,6 +15,12 @@ agents is:
 ./bin/token-deployer deploy request.json --broadcast --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY"
 ```
 
+To mint from a deployment that already exists:
+
+```bash
+./bin/token-deployer mint deployments/base/acme-token.json --to 0x... --amount 1000 --broadcast --rpc-url "$RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
+```
+
 Or dry-run the full scaffold, build, test, and script path without broadcasting:
 
 ```bash
@@ -82,6 +88,10 @@ After deployment, verify the contract on the explorer, then read back name,
 symbol, owner, decimals or base URI, supply or token ID flow, and one transfer
 or mint path.
 
+If later agents need to mint, prefer the repo CLI over composing raw `cast`
+calls by hand. Use the deployment manifest from `deploy` as the mint input, and
+remember that the signer must be the current onchain owner.
+
 7. Hand off machine-readable output.
 Return a deployment summary that includes token standard, chain id, deployer,
 deployed address, tx hash, constructor args, verification status, manifest
@@ -127,6 +137,10 @@ forge script script/DeployDefiCompatibleERC721.s.sol:DeployDefiCompatibleERC721 
 - Stop if build or tests fail.
 - Stop if deployment succeeds but verification or smoke checks disagree with
   the intended config.
+- Stop if an ERC20 mint is requested from a deployment where `mintable` was
+  disabled.
+- Stop if a mint broadcast uses any signer other than the current onchain
+  owner.
 
 ## Verification checklist
 

@@ -12,6 +12,12 @@ AgentSkills-compatible runtimes.
 ./bin/token-deployer deploy request.json --broadcast --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY"
 ```
 
+- Use the deployment manifest as the mint source of truth:
+
+```bash
+./bin/token-deployer mint deployments/base/acme-token.json --to 0x... --amount 1000 --broadcast --rpc-url "$RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
+```
+
 - Build a repo-local deployment package. Do not deploy from ad hoc snippets.
 - Build and test before any broadcast.
 - Dry-run the deploy script once without `--broadcast` when constructor args,
@@ -63,6 +69,8 @@ Return JSON with at least these keys:
 - `./bin/token-deployer scaffold request.json --target-dir /tmp/acme-token`
 - `./bin/token-deployer deploy request.json`
 - `./bin/token-deployer deploy request.json --broadcast --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --verify`
+- `./bin/token-deployer mint deployments/base/acme-token.json --to 0x... --amount 1000 --rpc-url "$RPC_URL"`
+- `./bin/token-deployer mint deployments/base/acme-token.json --to 0x... --amount 1000 --broadcast --rpc-url "$RPC_URL" --private-key "$OWNER_PRIVATE_KEY"`
 
 ## Failure contract
 
@@ -73,6 +81,10 @@ Return JSON with at least these keys:
 - Stop if the requested `chainId` or `chainName` disagrees with the selected RPC.
 - Stop if the operator supplies `chainName` for a broadcast chain whose canonical
   name is unknown to the tool; use `chainId` only or extend the chain map first.
+- Stop if a mint request is broadcast by any signer other than the current
+  onchain owner.
+- Stop if an ERC20 mint is requested for a deployment that was not created with
+  minting enabled.
 - Stop if smoke checks return different config than the requested config.
 
 ## Handoff rules

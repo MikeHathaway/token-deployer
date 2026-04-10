@@ -24,6 +24,8 @@ to call one command with JSON in and JSON out, the CLI is the stable interface.
 - runs `forge build` and `forge test`
 - simulates or broadcasts the deployment script
 - writes a machine-readable deployment manifest
+- simulates or broadcasts owner-authorized mint calls from an existing
+  deployment manifest
 
 ## Requirements
 
@@ -58,6 +60,26 @@ Broadcast a real deployment:
   --broadcast \
   --rpc-url "$RPC_URL" \
   --private-key "$PRIVATE_KEY"
+```
+
+Simulate an ERC20 mint from a deployment manifest:
+
+```bash
+./bin/token-deployer mint deployments/base/rapid-token.json \
+  --to 0x3333333333333333333333333333333333333333 \
+  --amount 1000000000000000000 \
+  --rpc-url "$RPC_URL"
+```
+
+Broadcast a real mint:
+
+```bash
+./bin/token-deployer mint deployments/base/rapid-token.json \
+  --to 0x3333333333333333333333333333333333333333 \
+  --amount 1000000000000000000 \
+  --broadcast \
+  --rpc-url "$RPC_URL" \
+  --private-key "$OWNER_PRIVATE_KEY"
 ```
 
 Request explorer verification through Foundry:
@@ -115,6 +137,8 @@ The CLI creates a workspace containing:
 
 Dry-run deployments write a manifest with `status: "simulated"`.
 Broadcast deployments write a manifest with `status: "deployed"`.
+Mint commands return JSON to stdout and reuse the deployment manifest as the
+input state.
 
 ## Commands
 
@@ -150,6 +174,28 @@ Runs the full flow:
 5. run the matching deploy script
 6. write a deployment manifest
 
+### `mint`
+
+```bash
+./bin/token-deployer mint <deployment.json> --to <address> [--amount <uint>] [--broadcast] [--rpc-url <url>] [--private-key <hex>]
+```
+
+Uses an existing deployment manifest as the source of truth for token standard,
+contract address, and expected chain. The CLI then:
+
+1. checks the selected RPC chain against the deployment manifest
+2. reads the current onchain owner
+3. simulates or broadcasts the matching owner-only mint function
+4. returns a machine-readable mint summary
+
+Rules:
+
+- ERC20 minting requires a token deployed with `mintable: true`
+- ERC20 minting requires `--amount`
+- ERC721 minting rejects `--amount`
+- broadcast minting requires the current owner key, not just the original
+  deployer key
+
 ## Safety Model
 
 - rejects fee-on-transfer, rebasing, blacklist, pause-in-transfer, and similar
@@ -160,6 +206,7 @@ Runs the full flow:
 - real deployment requires `--broadcast`
 - broadcast fails closed if the request `chainId` or `chainName` does not match
   the RPC chain
+- mint broadcast fails closed if the signer is not the current onchain owner
 - if the RPC chain id is not in the bundled canonical chain map, broadcasts must
   rely on `chainId`; request-sourced `chainName` is rejected instead of being
   copied into the manifest
@@ -184,6 +231,13 @@ from prose. The easiest stable entrypoint is:
 
 ```bash
 ./bin/token-deployer deploy request.json
+```
+
+To mint from an existing deployment, agents should pass the manifest produced by
+`deploy`:
+
+```bash
+./bin/token-deployer mint deployments/base/rapid-token.json --to 0x... --amount 1000 --broadcast --rpc-url "$RPC_URL" --private-key "$OWNER_PRIVATE_KEY"
 ```
 
 If the runtime supports skills directly, use `SKILL.md` as the repo-native skill
